@@ -1,0 +1,13 @@
+[package]
+name = "grampc-s-rs"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+description = "Rust-native stochastic MPC building blocks inspired by GRAMPC-S"
+
+[dependencies]
+nalgebra = { version = "0.33.3", default-features = false, features = ["std"] }
+rand = "0.9.2"
+rand_distr = "0.5.1"
+statrs = "0.18.0"
+thiserror = "2.0.18"
