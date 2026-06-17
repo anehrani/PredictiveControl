@@ -12,6 +12,9 @@ pub mod gaussian_process;
 pub mod polynomial;
 pub mod problem;
 pub mod simulator;
+pub mod smpc;
+pub mod solver;
+pub mod stochastic;
 pub mod transformation;
 
 pub use constraints::*;
@@ -21,6 +24,9 @@ pub use gaussian_process::*;
 pub use polynomial::*;
 pub use problem::*;
 pub use simulator::*;
+pub use smpc::*;
+pub use solver::*;
+pub use stochastic::*;
 pub use transformation::*;
 
 pub type Vector = nalgebra::DVector<f64>;

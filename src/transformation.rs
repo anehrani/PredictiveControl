@@ -3,6 +3,9 @@ use rand::Rng;
 
 use crate::distribution::{Distribution, PolynomialFamily};
 use crate::error::{Error, Result, dim_error};
+use crate::polynomial::{
+    HermitePolynomialGenerator, LegendrePolynomialGenerator, MultivariatePolynomial, Polynomial,
+};
 
 pub trait PointTransformation {
     fn input_dimension(&self) -> usize;
@@ -743,6 +746,276 @@ impl PointTransformation for ComposedQuadrature {
 }
 
 #[derive(Debug, Clone)]
+pub struct PceTransformation {
+    dim_x: usize,
+    dim_y: usize,
+    normalized_points: DMatrix<f64>,
+    weights_mean: DVector<f64>,
+    weights_cov: DMatrix<f64>,
+    squared_norms_var: DVector<f64>,
+}
+
+impl PceTransformation {
+    pub fn new(
+        dim_x: usize,
+        dim_y: usize,
+        polynomial_family: &[PolynomialFamily],
+        max_poly_order: usize,
+        quadrature_order: &[usize],
+    ) -> Result<Self> {
+        if polynomial_family.len() != dim_x || quadrature_order.len() != dim_x {
+            return Err(dim_error(
+                "pce inputs",
+                dim_x.to_string(),
+                format!("{}/{}", polynomial_family.len(), quadrature_order.len()),
+            ));
+        }
+
+        let quadrature =
+            ComposedQuadrature::new(dim_x, dim_y, polynomial_family, quadrature_order)?;
+        let dim_uncertain = quadrature_order.iter().filter(|&&order| order > 1).count();
+        let multi_indices =
+            expand_uncertain_multi_indices(dim_x, max_poly_order, quadrature_order, dim_uncertain);
+        let polynomials = build_multivariate_polynomials(polynomial_family, &multi_indices)?;
+        let squared_norms = DVector::from_iterator(
+            polynomials.len(),
+            polynomials.iter().map(MultivariatePolynomial::squared_norm),
+        );
+        let num_points = quadrature.weights().len();
+        let mut weights_mean = DVector::zeros(num_points);
+        let mut weights_cov = DMatrix::zeros(num_points, polynomials.len().saturating_sub(1));
+
+        for point_idx in 0..num_points {
+            let root = column_as_vec(quadrature.roots(), point_idx);
+            weights_mean[point_idx] = quadrature.weights()[point_idx]
+                * polynomials[0].evaluate(&root)?
+                / squared_norms[0];
+        }
+
+        for (poly_idx, polynomial) in polynomials.iter().enumerate().skip(1) {
+            for point_idx in 0..num_points {
+                let root = column_as_vec(quadrature.roots(), point_idx);
+                weights_cov[(point_idx, poly_idx - 1)] = quadrature.weights()[point_idx]
+                    * polynomial.evaluate(&root)?
+                    / squared_norms[poly_idx];
+            }
+        }
+
+        let squared_norms_var = DVector::from_iterator(
+            squared_norms.len().saturating_sub(1),
+            squared_norms.iter().skip(1).copied(),
+        );
+
+        Ok(Self {
+            dim_x,
+            dim_y,
+            normalized_points: quadrature.normalized_points().clone(),
+            weights_mean,
+            weights_cov,
+            squared_norms_var,
+        })
+    }
+
+    pub fn with_uniform_order(
+        dim_x: usize,
+        dim_y: usize,
+        polynomial_family: &[PolynomialFamily],
+        max_poly_order: usize,
+        quadrature_order: usize,
+    ) -> Result<Self> {
+        Self::new(
+            dim_x,
+            dim_y,
+            polynomial_family,
+            max_poly_order,
+            &vec![quadrature_order; dim_x],
+        )
+    }
+
+    pub fn weights_mean(&self) -> &DVector<f64> {
+        &self.weights_mean
+    }
+
+    pub fn weights_covariance(&self) -> &DMatrix<f64> {
+        &self.weights_cov
+    }
+
+    pub fn squared_norms_variance(&self) -> &DVector<f64> {
+        &self.squared_norms_var
+    }
+}
+
+impl PointTransformation for PceTransformation {
+    fn input_dimension(&self) -> usize {
+        self.dim_x
+    }
+
+    fn output_dimension(&self) -> usize {
+        self.dim_y
+    }
+
+    fn number_of_points(&self) -> usize {
+        self.weights_mean.len()
+    }
+
+    fn normalized_points(&self) -> &DMatrix<f64> {
+        &self.normalized_points
+    }
+
+    fn mean(&self, points: &DMatrix<f64>) -> Result<DVector<f64>> {
+        require_points(points, self.dim_y, self.number_of_points(), "mean points")?;
+        Ok(points * &self.weights_mean)
+    }
+
+    fn covariance(&self, points_x: &DMatrix<f64>, points_y: &DMatrix<f64>) -> Result<DMatrix<f64>> {
+        require_points(
+            points_x,
+            self.dim_x,
+            self.number_of_points(),
+            "covariance x points",
+        )?;
+        require_points(
+            points_y,
+            self.dim_y,
+            self.number_of_points(),
+            "covariance y points",
+        )?;
+        let coefficients_x = points_x * &self.weights_cov;
+        let coefficients_y = points_y * &self.weights_cov;
+        let mut covariance = DMatrix::zeros(self.dim_x, self.dim_y);
+        for i in 0..self.dim_x {
+            for j in 0..self.dim_y {
+                covariance[(i, j)] = coefficients_x
+                    .row(i)
+                    .iter()
+                    .zip(coefficients_y.row(j).iter())
+                    .zip(self.squared_norms_var.iter())
+                    .map(|((coeff_x, coeff_y), norm)| coeff_x * coeff_y * norm)
+                    .sum();
+            }
+        }
+        Ok(covariance)
+    }
+
+    fn variance(&self, points: &DVector<f64>) -> Result<f64> {
+        if points.len() != self.number_of_points() {
+            return Err(dim_error(
+                "variance points",
+                self.number_of_points().to_string(),
+                points.len().to_string(),
+            ));
+        }
+        let coefficients = self.weights_cov.transpose() * points;
+        Ok(coefficients
+            .iter()
+            .zip(self.squared_norms_var.iter())
+            .map(|(coefficient, norm)| coefficient.powi(2) * norm)
+            .sum())
+    }
+}
+
+fn expand_uncertain_multi_indices(
+    dim_x: usize,
+    max_poly_order: usize,
+    quadrature_order: &[usize],
+    dim_uncertain: usize,
+) -> Vec<Vec<usize>> {
+    let uncertain_indices = total_degree_multi_indices(dim_uncertain, max_poly_order);
+    uncertain_indices
+        .into_iter()
+        .map(|uncertain_multi_index| {
+            let mut full_index = vec![0; dim_x];
+            let mut uncertain_pos = 0;
+            for dim in 0..dim_x {
+                if quadrature_order[dim] > 1 {
+                    full_index[dim] = uncertain_multi_index[uncertain_pos];
+                    uncertain_pos += 1;
+                }
+            }
+            full_index
+        })
+        .collect()
+}
+
+fn total_degree_multi_indices(dim: usize, max_order: usize) -> Vec<Vec<usize>> {
+    if dim == 0 {
+        return vec![Vec::new()];
+    }
+    let mut out = Vec::new();
+    let mut current = vec![0; dim];
+    for total_degree in 0..=max_order {
+        push_multi_indices_with_degree(0, total_degree, &mut current, &mut out);
+    }
+    out
+}
+
+fn push_multi_indices_with_degree(
+    position: usize,
+    remaining_degree: usize,
+    current: &mut [usize],
+    out: &mut Vec<Vec<usize>>,
+) {
+    if position == current.len() - 1 {
+        current[position] = remaining_degree;
+        out.push(current.to_vec());
+        return;
+    }
+    for value in 0..=remaining_degree {
+        current[position] = value;
+        push_multi_indices_with_degree(position + 1, remaining_degree - value, current, out);
+    }
+}
+
+fn build_multivariate_polynomials(
+    families: &[PolynomialFamily],
+    multi_indices: &[Vec<usize>],
+) -> Result<Vec<MultivariatePolynomial>> {
+    multi_indices
+        .iter()
+        .map(|multi_index| {
+            let mut polynomials = Vec::with_capacity(families.len());
+            let mut squared_norms = Vec::with_capacity(families.len());
+            for (family, order) in families.iter().copied().zip(multi_index.iter().copied()) {
+                let (polynomial, squared_norm) = orthogonal_polynomial(family, order)?;
+                polynomials.push(polynomial);
+                squared_norms.push(squared_norm);
+            }
+            MultivariatePolynomial::new(polynomials, squared_norms)
+        })
+        .collect()
+}
+
+fn orthogonal_polynomial(family: PolynomialFamily, order: usize) -> Result<(Polynomial, f64)> {
+    match family {
+        PolynomialFamily::Hermite => {
+            let generator = HermitePolynomialGenerator::new(order);
+            Ok((
+                generator
+                    .polynomial(order)
+                    .expect("generated order")
+                    .clone(),
+                generator.squared_norm(order).expect("generated norm"),
+            ))
+        }
+        PolynomialFamily::Legendre => {
+            let generator = LegendrePolynomialGenerator::new(order);
+            Ok((
+                generator
+                    .polynomial(order)
+                    .expect("generated order")
+                    .clone(),
+                generator.squared_norm(order).expect("generated norm"),
+            ))
+        }
+        PolynomialFamily::MomentOnly => Err(Error::UnsupportedPolynomialFamily("MomentOnly")),
+    }
+}
+
+fn column_as_vec(matrix: &DMatrix<f64>, column: usize) -> Vec<f64> {
+    matrix.column(column).iter().copied().collect()
+}
+
+#[derive(Debug, Clone)]
 struct QuadratureRule {
     roots: DVector<f64>,
     normalized_points: DVector<f64>,
@@ -910,5 +1183,39 @@ mod tests {
         for point in points.iter() {
             assert!((-2.0..=3.0).contains(point));
         }
+    }
+
+    #[test]
+    fn pce_recovers_standard_normal_identity_moments() {
+        let pce = PceTransformation::with_uniform_order(1, 1, &[PolynomialFamily::Hermite], 1, 3)
+            .unwrap();
+        let points = pce.normalized_points().clone();
+        let mean = pce.mean(&points).unwrap();
+        let covariance = pce.covariance(&points, &points).unwrap();
+        let variance = pce.variance(&points.row(0).transpose()).unwrap();
+
+        assert!(mean[0].abs() < 1e-12);
+        assert!((covariance[(0, 0)] - 1.0).abs() < 1e-12);
+        assert!((variance - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pce_recovers_standard_normal_square_moments() {
+        let pce = PceTransformation::with_uniform_order(1, 1, &[PolynomialFamily::Hermite], 2, 3)
+            .unwrap();
+        let squared_points = DVector::from_iterator(
+            pce.number_of_points(),
+            pce.normalized_points()
+                .row(0)
+                .iter()
+                .map(|point| point.powi(2)),
+        );
+        let point_matrix =
+            DMatrix::from_row_slice(1, pce.number_of_points(), squared_points.as_slice());
+        let mean = pce.mean(&point_matrix).unwrap();
+        let variance = pce.variance(&squared_points).unwrap();
+
+        assert!((mean[0] - 1.0).abs() < 1e-12);
+        assert!((variance - 2.0).abs() < 1e-12);
     }
 }

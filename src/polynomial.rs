@@ -1,3 +1,5 @@
+use crate::error::{Result, dim_error};
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Polynomial {
     coefficients: Vec<f64>,
@@ -102,6 +104,57 @@ impl Polynomial {
         if other.coefficients.len() > self.coefficients.len() {
             self.coefficients.resize(other.coefficients.len(), 0.0);
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultivariatePolynomial {
+    polynomials: Vec<Polynomial>,
+    squared_norm: f64,
+}
+
+impl MultivariatePolynomial {
+    pub fn new(polynomials: Vec<Polynomial>, univariate_squared_norms: Vec<f64>) -> Result<Self> {
+        if polynomials.len() != univariate_squared_norms.len() {
+            return Err(dim_error(
+                "multivariate polynomial",
+                format!("{} squared norms", polynomials.len()),
+                format!("{} squared norms", univariate_squared_norms.len()),
+            ));
+        }
+        let squared_norm = univariate_squared_norms.iter().product();
+        Ok(Self {
+            polynomials,
+            squared_norm,
+        })
+    }
+
+    pub fn evaluate(&self, point: &[f64]) -> Result<f64> {
+        if point.len() != self.polynomials.len() {
+            return Err(dim_error(
+                "multivariate polynomial point",
+                self.polynomials.len().to_string(),
+                point.len().to_string(),
+            ));
+        }
+        Ok(self
+            .polynomials
+            .iter()
+            .zip(point.iter().copied())
+            .map(|(poly, value)| poly.evaluate(value))
+            .product())
+    }
+
+    pub fn polynomials(&self) -> &[Polynomial] {
+        &self.polynomials
+    }
+
+    pub fn num_variables(&self) -> usize {
+        self.polynomials.len()
+    }
+
+    pub fn squared_norm(&self) -> f64 {
+        self.squared_norm
     }
 }
 
@@ -215,6 +268,23 @@ mod tests {
         let mut product = Polynomial::new(vec![1.0, 1.0]);
         product.multiply_polynomial(&Polynomial::new(vec![1.0, -1.0]));
         assert_eq!(product.coefficients(), &[1.0, 0.0, -1.0]);
+    }
+
+    #[test]
+    fn multivariate_polynomial_evaluates_product_basis() {
+        let poly = MultivariatePolynomial::new(
+            vec![
+                Polynomial::new(vec![0.0, 1.0]),
+                Polynomial::new(vec![-1.0, 0.0, 1.0]),
+            ],
+            vec![1.0, 2.0],
+        )
+        .unwrap();
+
+        assert_eq!(poly.num_variables(), 2);
+        assert_eq!(poly.squared_norm(), 2.0);
+        assert!((poly.evaluate(&[3.0, 2.0]).unwrap() - 9.0).abs() < 1e-12);
+        assert!(poly.evaluate(&[1.0]).is_err());
     }
 
     #[test]
