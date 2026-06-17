@@ -10,10 +10,12 @@ code and Rust crates.
 This is not a direct binding to the external GRAMPC solver. It ports the solver-independent
 stochastic MPC pieces first:
 
-- moment-based distributions and sampling,
-- unscented, Stirling first-order, and composed Gaussian quadrature transformations,
+- moment-based distributions and sampling, including the upstream univariate distribution families,
+- Monte Carlo, unscented, Stirling first/second-order, and composed Gaussian quadrature transformations,
 - Gaussian, Chebyshev, and symmetric chance-constraint tightening,
-- squared-exponential Gaussian-process residual models,
+- Gaussian-process residual models with squared-exponential, Matern, periodic, locally periodic,
+  sum, and product kernels,
+- univariate polynomials with Hermite and Legendre generators,
 - lightweight problem and RK4 simulator traits,
 - a double-integrator example based on the upstream example shape.
 
@@ -37,9 +39,7 @@ so those layers can be added incrementally in Rust without changing the public f
 
 Rust-only porting priorities:
 
-1. Add the remaining distributions and random sampling APIs.
-2. Add polynomial types and polynomial-chaos expansion.
-3. Add the missing point transformations, including Monte Carlo and Stirling second order.
-4. Add the remaining Gaussian-process kernels and kernel composition.
-5. Add Rust-native deterministic optimal-control/SMPC solver integration.
-6. Port the upstream examples as Rust examples.
+1. Add multivariate polynomials and polynomial-chaos expansion.
+2. Add stochastic problem-description strategies: Taylor, sigma-point, Monte Carlo, and resampling.
+3. Add Rust-native deterministic optimal-control/SMPC solver integration.
+4. Port the upstream examples as Rust examples.

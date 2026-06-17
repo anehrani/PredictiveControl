@@ -1,4 +1,5 @@
 use nalgebra::{DMatrix, DVector, linalg::SymmetricEigen};
+use rand::Rng;
 
 use crate::distribution::{Distribution, PolynomialFamily};
 use crate::error::{Error, Result, dim_error};
@@ -47,6 +48,154 @@ pub trait PointTransformation {
     fn mean(&self, points: &DMatrix<f64>) -> Result<DVector<f64>>;
     fn covariance(&self, points_x: &DMatrix<f64>, points_y: &DMatrix<f64>) -> Result<DMatrix<f64>>;
     fn variance(&self, points: &DVector<f64>) -> Result<f64>;
+}
+
+#[derive(Debug, Clone)]
+pub struct MonteCarloTransformation {
+    dim_x: usize,
+    dim_y: usize,
+    number_of_points: usize,
+    weight: f64,
+}
+
+impl MonteCarloTransformation {
+    pub fn new(dim_x: usize, dim_y: usize, number_of_points: usize) -> Result<Self> {
+        if number_of_points == 0 {
+            return Err(Error::Empty("monte carlo points"));
+        }
+        Ok(Self {
+            dim_x,
+            dim_y,
+            number_of_points,
+            weight: 1.0 / number_of_points as f64,
+        })
+    }
+
+    pub fn input_dimension(&self) -> usize {
+        self.dim_x
+    }
+
+    pub fn output_dimension(&self) -> usize {
+        self.dim_y
+    }
+
+    pub fn number_of_points(&self) -> usize {
+        self.number_of_points
+    }
+
+    pub fn points_from_distribution<D: Distribution, R: Rng + ?Sized>(
+        &self,
+        dist: &D,
+        rng: &mut R,
+    ) -> Result<DMatrix<f64>> {
+        if dist.dimension() != self.dim_x {
+            return Err(dim_error(
+                "monte carlo distribution",
+                self.dim_x.to_string(),
+                dist.dimension().to_string(),
+            ));
+        }
+        let mut points = DMatrix::zeros(self.dim_x, self.number_of_points);
+        for point_index in 0..self.number_of_points {
+            points.set_column(point_index, &dist.sample(rng));
+        }
+        Ok(points)
+    }
+
+    pub fn mean(&self, points: &DMatrix<f64>) -> Result<DVector<f64>> {
+        require_points(points, self.dim_y, self.number_of_points, "mean points")?;
+        Ok(rowwise_mean(points))
+    }
+
+    pub fn covariance(
+        &self,
+        points_x: &DMatrix<f64>,
+        points_y: &DMatrix<f64>,
+    ) -> Result<DMatrix<f64>> {
+        require_points(
+            points_x,
+            self.dim_x,
+            self.number_of_points,
+            "covariance x points",
+        )?;
+        require_points(
+            points_y,
+            self.dim_y,
+            self.number_of_points,
+            "covariance y points",
+        )?;
+        let mean_x = rowwise_mean(points_x);
+        let mean_y = rowwise_mean(points_y);
+        let mut covariance = DMatrix::zeros(self.dim_x, self.dim_y);
+        for i in 0..self.number_of_points {
+            let dx = points_x.column(i) - &mean_x;
+            let dy = points_y.column(i) - &mean_y;
+            covariance += self.weight * dx * dy.transpose();
+        }
+        Ok(covariance)
+    }
+
+    pub fn covariance_matrix(&self, points: &DMatrix<f64>) -> Result<DMatrix<f64>> {
+        if points.ncols() != self.number_of_points {
+            return Err(dim_error(
+                "covariance matrix points",
+                format!("{} columns", self.number_of_points),
+                format!("{} columns", points.ncols()),
+            ));
+        }
+        let mean = rowwise_mean(points);
+        let mut covariance = DMatrix::zeros(points.nrows(), points.nrows());
+        for i in 0..self.number_of_points {
+            let diff = points.column(i) - &mean;
+            covariance += self.weight * diff.clone_owned() * diff.transpose();
+        }
+        Ok(covariance)
+    }
+
+    pub fn variance(&self, points: &DVector<f64>) -> Result<f64> {
+        if points.len() != self.number_of_points {
+            return Err(dim_error(
+                "variance points",
+                self.number_of_points.to_string(),
+                points.len().to_string(),
+            ));
+        }
+        let mean = points.sum() * self.weight;
+        Ok(points
+            .iter()
+            .map(|point| self.weight * (point - mean).powi(2))
+            .sum())
+    }
+
+    pub fn set_point(
+        &self,
+        points: &mut DMatrix<f64>,
+        index: usize,
+        new_point: &DVector<f64>,
+    ) -> Result<()> {
+        require_points(
+            points,
+            self.dim_x,
+            self.number_of_points,
+            "monte carlo points",
+        )?;
+        if index >= self.number_of_points {
+            return Err(dim_error(
+                "monte carlo point index",
+                format!("0..{}", self.number_of_points),
+                index.to_string(),
+            ));
+        }
+        if new_point.len() != self.dim_x {
+            return Err(dim_error(
+                "monte carlo new point",
+                self.dim_x.to_string(),
+                new_point.len().to_string(),
+            ));
+        }
+        points.set_column(index, new_point);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -320,7 +469,6 @@ impl PointTransformation for StirlingFirstOrder {
 pub struct StirlingSecondOrder {
     dim_x: usize,
     dim_y: usize,
-    step_size: f64,
     num_uncertain: usize,
     normalized_points: DMatrix<f64>,
     weight_mean_center: f64,
@@ -371,7 +519,6 @@ impl StirlingSecondOrder {
         Ok(Self {
             dim_x,
             dim_y,
-            step_size,
             num_uncertain,
             normalized_points,
             weight_mean_center: (step_size_squared - num_uncertain as f64) / step_size_squared,
@@ -403,7 +550,8 @@ impl PointTransformation for StirlingSecondOrder {
         require_points(points, self.dim_y, self.number_of_points(), "mean points")?;
         let mut mean = self.weight_mean_center * points.column(0);
         for i in 1..=self.num_uncertain {
-            mean += self.weight_mean_axis * (points.column(i) + points.column(i + self.num_uncertain));
+            mean +=
+                self.weight_mean_axis * (points.column(i) + points.column(i + self.num_uncertain));
         }
         Ok(mean.into_owned())
     }
@@ -427,10 +575,10 @@ impl PointTransformation for StirlingSecondOrder {
             let dy_first = points_y.column(i) - points_y.column(i + self.num_uncertain);
             covariance += self.weight_cov_first * dx_first * dy_first.transpose();
 
-            let dx_second =
-                points_x.column(i) + points_x.column(i + self.num_uncertain) - 2.0 * points_x.column(0);
-            let dy_second =
-                points_y.column(i) + points_y.column(i + self.num_uncertain) - 2.0 * points_y.column(0);
+            let dx_second = points_x.column(i) + points_x.column(i + self.num_uncertain)
+                - 2.0 * points_x.column(0);
+            let dy_second = points_y.column(i) + points_y.column(i + self.num_uncertain)
+                - 2.0 * points_y.column(0);
             covariance += self.weight_cov_second * dx_second * dy_second.transpose();
         }
         Ok(covariance)
@@ -448,8 +596,8 @@ impl PointTransformation for StirlingSecondOrder {
         for i in 1..=self.num_uncertain {
             let first = points[i] - points[i + self.num_uncertain];
             let second = points[i] + points[i + self.num_uncertain] - 2.0 * points[0];
-            variance += self.weight_cov_first * first.powi(2)
-                + self.weight_cov_second * second.powi(2);
+            variance +=
+                self.weight_cov_first * first.powi(2) + self.weight_cov_second * second.powi(2);
         }
         Ok(variance)
     }
@@ -674,9 +822,17 @@ fn require_points(
     Ok(())
 }
 
+fn rowwise_mean(points: &DMatrix<f64>) -> DVector<f64> {
+    let weight = 1.0 / points.ncols() as f64;
+    DVector::from_fn(points.nrows(), |row, _| points.row(row).sum() * weight)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::distribution::Uniform;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     #[test]
     fn unscented_recovers_identity_moments() {
@@ -700,5 +856,59 @@ mod tests {
         )
         .unwrap();
         assert!((quad.weights().sum() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn stirling_second_order_recovers_identity_moments() {
+        let st = StirlingSecondOrder::new(2, 2, 3.0_f64.sqrt()).unwrap();
+        let mean = DVector::from_vec(vec![1.0, -2.0]);
+        let chol = DMatrix::from_row_slice(2, 2, &[2.0, 0.0, 0.3, 1.0]);
+        let points = st.points_from_moments(&mean, &chol).unwrap();
+        let recovered_mean = st.mean(&points).unwrap();
+        let recovered_cov = st.covariance(&points, &points).unwrap();
+        assert!((&recovered_mean - mean).amax() < 1e-12);
+        assert!((recovered_cov - &chol * chol.transpose()).amax() < 1e-12);
+    }
+
+    #[test]
+    fn stirling_second_order_captures_scalar_square_moments() {
+        let st = StirlingSecondOrder::new(1, 1, 3.0_f64.sqrt()).unwrap();
+        let points = DVector::from_vec(vec![0.0, 3.0, 3.0]);
+        let mean = st
+            .mean(&DMatrix::from_row_slice(1, 3, points.as_slice()))
+            .unwrap();
+        let variance = st.variance(&points).unwrap();
+        assert!((mean[0] - 1.0).abs() < 1e-12);
+        assert!((variance - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn monte_carlo_computes_empirical_moments() {
+        let mc = MonteCarloTransformation::new(2, 2, 3).unwrap();
+        let points = DMatrix::from_row_slice(2, 3, &[1.0, 2.0, 3.0, 2.0, 4.0, 6.0]);
+        let mean = mc.mean(&points).unwrap();
+        let covariance = mc.covariance(&points, &points).unwrap();
+        let variance = mc
+            .variance(&DVector::from_vec(vec![1.0, 2.0, 3.0]))
+            .unwrap();
+
+        assert!((mean - DVector::from_vec(vec![2.0, 4.0])).amax() < 1e-12);
+        assert!((covariance[(0, 0)] - 2.0 / 3.0).abs() < 1e-12);
+        assert!((covariance[(0, 1)] - 4.0 / 3.0).abs() < 1e-12);
+        assert!((covariance[(1, 1)] - 8.0 / 3.0).abs() < 1e-12);
+        assert!((variance - 2.0 / 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn monte_carlo_samples_from_distribution() {
+        let mc = MonteCarloTransformation::new(1, 1, 16).unwrap();
+        let dist = Uniform::univariate(-2.0, 3.0).unwrap();
+        let mut rng = StdRng::seed_from_u64(11);
+        let points = mc.points_from_distribution(&dist, &mut rng).unwrap();
+
+        assert_eq!(points.shape(), (1, 16));
+        for point in points.iter() {
+            assert!((-2.0..=3.0).contains(point));
+        }
     }
 }

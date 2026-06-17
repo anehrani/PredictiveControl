@@ -216,6 +216,109 @@ impl Distribution for Uniform {
 }
 
 #[derive(Debug, Clone)]
+pub struct PiecewiseConstant {
+    interval_limits: Vec<f64>,
+    cumulative_weights: Vec<f64>,
+    total_weight: f64,
+    moments: MomentDistribution,
+}
+
+impl PiecewiseConstant {
+    pub fn univariate(interval_limits: Vec<f64>, interval_density: Vec<f64>) -> Result<Self> {
+        if interval_limits.len() < 2 {
+            return Err(Error::Empty("interval_limits"));
+        }
+        if interval_density.len() + 1 != interval_limits.len() {
+            return Err(dim_error(
+                "piecewise constant density",
+                format!("{} densities", interval_limits.len() - 1),
+                format!("{} densities", interval_density.len()),
+            ));
+        }
+
+        let mut cumulative_weights = Vec::with_capacity(interval_density.len());
+        let mut total_weight = 0.0;
+        let mut weighted_mean = 0.0;
+        let mut weighted_second_moment = 0.0;
+
+        for (interval_index, density) in interval_density.iter().copied().enumerate() {
+            if density < 0.0 {
+                return Err(Error::NonPositiveParameter {
+                    name: "interval_density",
+                    value: density,
+                });
+            }
+            let lower = interval_limits[interval_index];
+            let upper = interval_limits[interval_index + 1];
+            if lower >= upper {
+                return Err(dim_error(
+                    "piecewise constant interval",
+                    "strictly increasing limits",
+                    format!("{lower} >= {upper}"),
+                ));
+            }
+            let width = upper - lower;
+            let weight = density * width;
+            let interval_mean = 0.5 * (lower + upper);
+            let interval_second_moment = width.powi(2) / 12.0 + interval_mean.powi(2);
+            total_weight += weight;
+            cumulative_weights.push(total_weight);
+            weighted_mean += weight * interval_mean;
+            weighted_second_moment += weight * interval_second_moment;
+        }
+
+        if total_weight <= 0.0 {
+            return Err(Error::NonPositiveParameter {
+                name: "total_interval_weight",
+                value: total_weight,
+            });
+        }
+
+        let mean = weighted_mean / total_weight;
+        let variance = weighted_second_moment / total_weight - mean.powi(2);
+        Ok(Self {
+            interval_limits,
+            cumulative_weights,
+            total_weight,
+            moments: univariate_moments(mean, variance, PolynomialFamily::MomentOnly)?,
+        })
+    }
+}
+
+impl Distribution for PiecewiseConstant {
+    fn mean(&self) -> &DVector<f64> {
+        self.moments.mean()
+    }
+
+    fn covariance(&self) -> &DMatrix<f64> {
+        self.moments.covariance()
+    }
+
+    fn cov_cholesky(&self) -> &DMatrix<f64> {
+        self.moments.cov_cholesky()
+    }
+
+    fn polynomial_family(&self) -> &[PolynomialFamily] {
+        self.moments.polynomial_family()
+    }
+
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> DVector<f64> {
+        let target = rng.random_range(0.0..self.total_weight);
+        let interval_index = self
+            .cumulative_weights
+            .iter()
+            .position(|weight| target <= *weight)
+            .unwrap_or(self.cumulative_weights.len() - 1);
+        DVector::from_element(
+            1,
+            rng.random_range(
+                self.interval_limits[interval_index]..=self.interval_limits[interval_index + 1],
+            ),
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Exponential {
     lambda: f64,
     moments: MomentDistribution,
@@ -753,6 +856,9 @@ mod tests {
         assert_scalar_moments(&LogNormal::univariate(0.2, 0.4).unwrap());
         assert_scalar_moments(&Weibull::univariate(2.0, 3.0).unwrap());
         assert_scalar_moments(&Beta::univariate(2.0, 5.0).unwrap());
+        assert_scalar_moments(
+            &PiecewiseConstant::univariate(vec![0.0, 1.0, 3.0], vec![1.0, 0.5]).unwrap(),
+        );
         assert_scalar_moments(&StudentT::univariate(5.0).unwrap());
         assert_scalar_moments(&FisherF::univariate(6.0, 10.0).unwrap());
         assert_scalar_moments(&ExtremeValue::univariate(1.0, 2.0).unwrap());
@@ -766,6 +872,10 @@ mod tests {
         assert_scalar_sample(&LogNormal::univariate(0.2, 0.4).unwrap(), &mut rng);
         assert_scalar_sample(&Weibull::univariate(2.0, 3.0).unwrap(), &mut rng);
         assert_scalar_sample(&Beta::univariate(2.0, 5.0).unwrap(), &mut rng);
+        assert_scalar_sample(
+            &PiecewiseConstant::univariate(vec![0.0, 1.0, 3.0], vec![1.0, 0.5]).unwrap(),
+            &mut rng,
+        );
         assert_scalar_sample(&StudentT::univariate(5.0).unwrap(), &mut rng);
         assert_scalar_sample(&FisherF::univariate(6.0, 10.0).unwrap(), &mut rng);
         assert_scalar_sample(&ExtremeValue::univariate(1.0, 2.0).unwrap(), &mut rng);
@@ -775,6 +885,19 @@ mod tests {
     fn student_t_and_fisher_f_reject_infinite_variance_parameters() {
         assert!(StudentT::univariate(2.0).is_err());
         assert!(FisherF::univariate(4.0, 4.0).is_err());
+    }
+
+    #[test]
+    fn piecewise_constant_normalizes_interval_weights() {
+        let dist = PiecewiseConstant::univariate(vec![0.0, 1.0, 3.0], vec![1.0, 0.5]).unwrap();
+        assert!((dist.mean()[0] - 1.25).abs() < 1e-12);
+        assert!((dist.covariance()[(0, 0)] - 37.0 / 48.0).abs() < 1e-12);
+
+        let mut rng = StdRng::seed_from_u64(21);
+        for _ in 0..32 {
+            let sample = dist.sample(&mut rng);
+            assert!((0.0..=3.0).contains(&sample[0]));
+        }
     }
 
     fn assert_scalar_moments<D: Distribution>(dist: &D) {
