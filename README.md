@@ -20,7 +20,8 @@ stochastic MPC pieces first:
 - lightweight problem, stochastic dynamics moment propagation, RK4 simulation, shooting solver
   with quadratic-penalty and augmented-Lagrangian inequality handling, and stochastic MPC
   moment-state orchestration,
-- a double-integrator example based on the upstream example shape.
+- double-integrator, mass-spring-damper, reactor, and inverted-pendulum examples based on the
+  upstream example shapes.
 
 Run the tests:
 
@@ -28,11 +29,14 @@ Run the tests:
 cargo test
 ```
 
-Run the example:
+Run the examples:
 
 ```sh
 cargo run --example double_integrator
 cargo run --example double_integrator_solver
+cargo run --example inverted_pendulum
+cargo run --example mass_spring_damper
+cargo run --example reactor
 cargo run --example stochastic_double_integrator_mpc
 ```
 
@@ -45,6 +49,6 @@ so those layers can be added incrementally in Rust without changing the public f
 Remaining Rust-only porting priorities:
 
 1. Improve the Rust-native solver toward GRAMPC-style line search, scaling, and multiplier updates.
-2. Port the remaining upstream examples as Rust examples.
+2. Port any remaining upstream examples as Rust examples.
 3. Add end-to-end numerical validation against upstream examples and documented formulas.
 4. Expand documentation for the Rust-native APIs and solver limitations.
