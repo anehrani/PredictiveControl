@@ -55,6 +55,7 @@ dependencies = [
 [[package]]
 name = "grampc-s-rs"
 version = "0.1.0"
+source = "git+https://github.com/schliffen/GRMPSC-S-R.git#90538c7d0be06a5d27a2e1c0843b1555aea5810a"
 dependencies = [
  "nalgebra",
  "rand 0.9.4",
@@ -164,6 +165,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "predictiveControl"
+version = "0.1.0"
+dependencies = [
+ "grampc-s-rs",
+ "nalgebra",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "statrs",
+ "thiserror",
 ]
 
 [[package]]
